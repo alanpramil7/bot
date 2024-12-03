@@ -1,0 +1,9 @@
+langchain
+langchain_community
+fastapi
+unstructured
+uvicorn
+python-multipart
+chromadb
+numpy
+onnxruntime
