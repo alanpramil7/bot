@@ -7,3 +7,4 @@ python-multipart
 chromadb
 numpy
 onnxruntime
+langchain_ollama
