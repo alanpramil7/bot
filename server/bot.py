@@ -1,16 +1,19 @@
 import logging
+import requests
 import os.path
 import uuid
 from typing import List, Dict
+from urllib.parse import urlparse
 
 import chromadb.config
 import uvicorn
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from pydantic import BaseModel
+from langchain_community.document_loaders import WebBaseLoader
 from langchain.docstore.document import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama
@@ -39,10 +42,17 @@ app = FastAPI(title="PDF Chatbot", description="Context-aware PDF Chat", version
 # In-memory conversation history storage
 conversation_history: Dict[str, List[Dict[str, str]]] = {}
 
+
 # Chat request model
 class ChatRequest(BaseModel):
     document_id: str
     query: str
+
+
+# Website request model
+class WebsiteRequest(BaseModel):
+    url: str
+
 
 # Extract text from given document and return list of documents
 def extract_text(file_path: str) -> List[Document]:
@@ -65,6 +75,7 @@ def extract_text(file_path: str) -> List[Document]:
         logger.error(f"PDF extraction error: {e}")
         raise HTTPException(status_code=500, detail=f"PDF extraction error: {e}")
 
+
 # Process the input file
 def process_pdf(file_path: str) -> str:
     logger.info("Creating document id")
@@ -76,7 +87,7 @@ def process_pdf(file_path: str) -> str:
         logger.info("Creating chromadb collection")
         Chroma.from_documents(
             docs,
-            OllamaEmbeddings(model="llama3.2"),
+            OllamaEmbeddings(model="nomic-embed-text"),
             client_settings=chroma_settings,
             collection_name=document_id,
         )
@@ -89,6 +100,55 @@ def process_pdf(file_path: str) -> str:
         raise HTTPException(
             status_code=500, detail=f"Error while processing document: {e}"
         )
+
+
+# Function to check wether the url is valid
+def is_valid_url(url: str) -> bool:
+    try:
+        logger.info(f"Validating the url: {url}")
+        result = urlparse(url)
+        return all([result.scheme, result.netloc])
+        logger.info(f"Valid url: {url}")
+    except Exception as e:
+        logger.info(f"Invalid url: {e}")
+        return False
+
+
+# Function to parse and process the webpage
+def process_website(url: str) -> str:
+    logger.info(f"Processing the url: {url}")
+    document_id = str(uuid.uuid4())
+
+    try:
+        # Content extarction from website
+        loader = WebBaseLoader(url)
+        docs = loader.load()
+
+        # Text Splitting
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=["\n\n", "\n", ".", "!", "?"]
+        )
+        split_docs = text_splitter.split_documents(docs)
+
+        # Store in chromadb
+        logger.info("Creating chromadb collection")
+        Chroma.from_documents(
+            split_docs,
+            OllamaEmbeddings(model="nomic-embed-text"),
+            client_settings=chroma_settings,
+            collection_name=document_id,
+        )
+        logger.info("Created chromadb collection")
+
+        logger.info(f"Website sucessfully processed: {document_id}")
+        return document_id
+
+    except Exception as e:
+        logger.error(f"Error porcessign the website: {e}")
+        raise HTTPException(status_code=400, detail=f"Error processing website: {e}")
+
 
 # API to process the document
 @app.post("/upload")
@@ -112,7 +172,10 @@ async def upload_document(file: UploadFile = File(...)):
         document_id = process_pdf(tmp_file_path)
 
         logger.info("Pdf uploaded successfully")
-        return {"document_id": document_id}
+        return {
+            "status": "success",
+            "Document ID": document_id
+        }
 
     except Exception as e:
         logger.error(f"Pdf upload error: {e}")
@@ -122,6 +185,37 @@ async def upload_document(file: UploadFile = File(...)):
         if os.path.exists(tmp_file_path):
             os.remove(tmp_file_path)
 
+
+@app.post("/website")
+async def process_webiste(request: WebsiteRequest):
+    logger.info(f"Recived url for parsing: {request.url}")
+
+    # Validate the url
+    if not is_valid_url(request.url):
+        raise HTTPException(status_code=400, detail="Invalid url provided")
+
+    try:
+        # verify the webiste accessibility
+        response = requests.head(request.url, timeout=10)
+        response.raise_for_status()
+
+        # Proces the website
+        document_id = process_website(request.url)
+
+        return {
+            "status": "success",
+            "Document ID": document_id
+        }
+
+    except requests.RequestException as r:
+        logger.error(f"Could not access the webiste: {r}")
+        raise HTTPException(status_code=400, detail=f"Could not access the website: {r}")
+
+    except Exception as e:
+        logger.error(f"Error processing the website: {e}")
+        raise HTTPException(status_code=400, detail=f"Error processing the website: {e}")
+
+
 # Chat endpoint
 @app.post("/chat")
 async def chat_with_document(chat_request: ChatRequest):
@@ -129,7 +223,7 @@ async def chat_with_document(chat_request: ChatRequest):
         # Retrieve document collection
         vectorstore = Chroma(
             collection_name=chat_request.document_id,
-            embedding_function=OllamaEmbeddings(model="llama3.2"),
+            embedding_function=OllamaEmbeddings(model="nomic-embed-text"),
             client_settings=chroma_settings
         )
 
@@ -151,17 +245,36 @@ async def chat_with_document(chat_request: ChatRequest):
 
         # Prepare prompt template
         prompt = ChatPromptTemplate.from_template("""
-        System: You are a helpful AI assistant that provides accurate,
-        contextual responses based on the provided document or webpage content.
-        Always maintain a professional tone and cite specific parts of the content when relevant.
+        System: You are a knowledgeable AI assistant specialized in analyzing and explaining content from both
+        documents and websites.
+        Your responses should be:
+        - Accurate and based on the provided context
+        - Well-structured and easy to understand
+        - Include relevant quotes or references when appropriate
+        - Clear about any uncertainties or limitations in the information
 
         Context Information:
         {context}
 
-        Previous Conversation History:
+        Previous Conversation:
         {chat_history}
 
-        Human: {query}
+        Current Query: {query}
+
+        Instructions:
+        1. First analyze the context thoroughly
+        2. Consider the conversation history for better continuity
+        3. Provide a structured response with clear sections if needed
+        4. Use bullet points for multiple items
+        5. Include specific references to sources when possible
+        6. If information is not in the context, clearly state that
+
+        Response Format:
+        - Start with a direct answer to the query
+        - Follow with supporting details and examples
+        - End with any necessary clarifications or caveats
+
+        Assistant: Let me help you with that question...
         """)
 
         # Initialize Ollama chat model
@@ -211,5 +324,11 @@ curl -X POST http://localhost:8080/chat \
 -d '{
     "document_id": "e46b8630-3216-4d79-a1fc-4e255a7c98f9",
     "query": "What are the main points in this document?"
+}'
+-------------website-----------------
+curl -X POST http://localhost:8080/website \
+-H "Content-Type: application/json" \
+-d '{
+    "url": "https://en.wikipedia.org/wiki/Artificial_intelligence"
 }'
 '''
