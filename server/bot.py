@@ -17,7 +17,12 @@ from langchain_ollama import ChatOllama
 
 # Basic logging configuration
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("app.log"),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -146,14 +151,17 @@ async def chat_with_document(chat_request: ChatRequest):
 
         # Prepare prompt template
         prompt = ChatPromptTemplate.from_template("""
-        Context from PDF: {context}
+        System: You are a helpful AI assistant that provides accurate,
+        contextual responses based on the provided document or webpage content.
+        Always maintain a professional tone and cite specific parts of the content when relevant.
 
-        Previous Conversation:
+        Context Information:
+        {context}
+
+        Previous Conversation History:
         {chat_history}
 
         Human: {query}
-
-        Assistant: Based on the context and conversation history, provide a helpful and accurate response.
         """)
 
         # Initialize Ollama chat model
